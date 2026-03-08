@@ -229,6 +229,7 @@ class OnIt(BaseModel):
     prompt_intro: str | None = Field(default=None)
     timeout: int | None = Field(default=None)
     show_logs: bool = Field(default=False)
+    stream: bool = Field(default=True)
     loop: bool = Field(default=False)
     period: float = Field(default=10.0)
     task: str | None = Field(default=None)
@@ -393,6 +394,7 @@ class OnIt(BaseModel):
         if self.timeout is not None and self.timeout < 0:
             self.timeout = None  # no timeout
         self.show_logs = self.config_data.get('show_logs', False)
+        self.stream = self.config_data.get('stream', True)
         self.loop = self.config_data.get('loop', False)
         self.period = float(self.config_data.get('period', 20.0))
         self.task = self.config_data.get('task', None)
@@ -510,6 +512,7 @@ class OnIt(BaseModel):
             'data_path': effective_data_path,
             'max_tokens': self.model_serving.get('max_tokens', 262144),
             'session_history': self.load_session_history(session_path=effective_session_path),
+            'stream': self.stream,
         }
         if self.prompt_intro:
             kwargs['prompt_intro'] = self.prompt_intro
@@ -934,7 +937,7 @@ class OnIt(BaseModel):
                           'data_path': self.data_path,
                           'max_tokens': self.model_serving.get('max_tokens', 262144),
                           'session_history': self.load_session_history(),
-                          'stream': not self.web}  # stream tokens live for text UI only
+                          'stream': self.stream}
                 if self.prompt_intro:
                     kwargs['prompt_intro'] = self.prompt_intro
                 last_response = await chat(host=self.model_serving["host"],

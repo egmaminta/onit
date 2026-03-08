@@ -39,5 +39,5 @@ htmlcov/
 *.log
 
 # Scripts
-scripts/
-*example.yaml
+configs/*
+scripts/*

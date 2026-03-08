@@ -523,6 +523,9 @@ class ChatUI:
         _FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
         def _animate() -> None:
+            # Show blinking block cursor while thinking
+            sys.stdout.write("\033[?25h\033[1 q")
+            sys.stdout.flush()
             msg_idx = 0
             frame_idx = 0
             ticks = 0
@@ -551,8 +554,8 @@ class ChatUI:
         if self._thinking_thread:
             self._thinking_thread.join(timeout=1.0)
             self._thinking_thread = None
-        # Erase the entire current line so no spinner artifacts remain
-        sys.stdout.write("\r\033[2K")
+        # Erase the entire current line and restore blinking bar cursor
+        sys.stdout.write("\r\033[2K\033[?25h\033[5 q")
         sys.stdout.flush()
 
     def start_thinking(self) -> None:
@@ -747,7 +750,8 @@ class ChatUI:
             The user's input string
         """
         # Print prompt
-        sys.stdout.write(f"\033[1;32m{prompt}\033[0m")  # Bold green prompt
+        # Show blinking bar cursor + bold green prompt
+        sys.stdout.write(f"\033[?25h\033[5 q\033[1;32m{prompt}\033[0m")
         sys.stdout.flush()
 
         fd = sys.stdin.fileno()
@@ -887,7 +891,8 @@ class ChatUI:
         Returns:
             The user's input string
         """
-        sys.stdout.write(f"\033[1;32m{prompt}\033[0m")  # Bold green prompt
+        # Show blinking bar cursor + bold green prompt
+        sys.stdout.write(f"\033[?25h\033[5 q\033[1;32m{prompt}\033[0m")
         sys.stdout.flush()
 
         current_input = []

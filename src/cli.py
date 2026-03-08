@@ -327,6 +327,9 @@ def main():
                         help='Text UI theme (e.g. "white", "dark").')
     parser.add_argument('--show-logs', action='store_true', default=None,
                         help='Show execution logs.')
+    parser.add_argument('--no-stream', action='store_true', default=None,
+                        dest='no_stream',
+                        help='Disable streaming of tokens (streaming is enabled by default for text, web and a2a modes).')
 
     # Web UI options
     parser.add_argument('--web', action='store_true', default=None,
@@ -438,6 +441,10 @@ def main():
         value = getattr(args, arg_name, None)
         if value is not None:
             config_data[config_key] = value
+
+    # --no-stream explicitly disables streaming (default is True)
+    if args.no_stream:
+        config_data['stream'] = False
 
     # --host overrides serving.host in config
     if args.host:
