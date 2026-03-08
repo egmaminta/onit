@@ -508,7 +508,7 @@ class OnIt(BaseModel):
         kwargs = {
             'console': None, 'chat_ui': None,
             'cursor': AGENT_CURSOR, 'memories': None,
-            'verbose': self.verbose,
+            'verbose': self.verbose or self.show_logs,
             'data_path': effective_data_path,
             'max_tokens': self.model_serving.get('max_tokens', 262144),
             'session_history': self.load_session_history(session_path=effective_session_path),
@@ -725,7 +725,8 @@ class OnIt(BaseModel):
 
         print(f"A2A server running at http://0.0.0.0:{self.a2a_port}/ (Ctrl+C to stop)")
 
-        config = uvicorn.Config(wrapped_app, host="0.0.0.0", port=self.a2a_port, log_level="info" if self.verbose else "warning", access_log=self.verbose)
+        _verbose_or_logs = self.verbose or self.show_logs
+        config = uvicorn.Config(wrapped_app, host="0.0.0.0", port=self.a2a_port, log_level="info" if _verbose_or_logs else "warning", access_log=_verbose_or_logs)
         server = uvicorn.Server(config)
         await server.serve()
 

@@ -342,6 +342,8 @@ async def chat(host: str = "http://127.0.0.1:8001/v1",
 
     if chat_ui:
         chat_ui.add_log(f"Starting chat with model: {model}", level="info")
+    elif verbose:
+        print(f"Starting chat with model: {model}")
 
     MAX_CHAT_ITERATIONS = 100
     MAX_REPEATED_TOOL_CALLS = 30
@@ -656,6 +658,8 @@ async def chat(host: str = "http://127.0.0.1:8001/v1",
                             tool_response = f"- tool call timed out after {timeout} seconds. Tool might have succeeded but no response was received. Check expected output."
                             if chat_ui:
                                 chat_ui.add_log(f"{function_name} timed out after {timeout}s", level="warning")
+                            elif verbose:
+                                print(f"{function_name} timed out after {timeout}s")
                         if chat_ui:
                             chat_ui.stop_tool_spinner()
                         tool_response = "" if tool_response is None else str(tool_response)
@@ -676,6 +680,9 @@ async def chat(host: str = "http://127.0.0.1:8001/v1",
                         if chat_ui:
                             chat_ui.add_tool_result(function_name, tool_response)
                             chat_ui.show_tool_done(function_name, tool_response)
+                        elif verbose:
+                            truncated = tool_response[:500] + "..." if len(tool_response) > 500 else tool_response
+                            print(f"{function_name} returned: {truncated}")
                     except Exception as e:
                         if chat_ui:
                             chat_ui.stop_tool_spinner()
