@@ -84,8 +84,12 @@ def _validate_required(**kwargs) -> str:
 
 
 def _validate_read_path(file_path: str) -> str:
-    """Validate that the path is within DATA_PATH. Returns resolved absolute path.
+    """Validate that the path is within DATA_PATH.
+    Relative paths are resolved against DATA_PATH (not CWD).
+    Returns resolved absolute path.
     Raises ValueError if outside allowed directory."""
+    if not os.path.isabs(os.path.expanduser(file_path)):
+        file_path = os.path.join(DATA_PATH, file_path)
     abs_path = os.path.realpath(os.path.expanduser(file_path))
     abs_data = os.path.realpath(os.path.expanduser(DATA_PATH))
     if abs_path.startswith(abs_data + os.sep) or abs_path == abs_data:
@@ -96,8 +100,12 @@ def _validate_read_path(file_path: str) -> str:
 
 
 def _validate_dir_path(dir_path: str) -> str:
-    """Validate a directory path is within DATA_PATH. Returns resolved absolute path.
+    """Validate a directory path is within DATA_PATH.
+    Relative paths are resolved against DATA_PATH (not CWD).
+    Returns resolved absolute path.
     Raises ValueError if outside allowed directory."""
+    if not os.path.isabs(os.path.expanduser(dir_path)):
+        dir_path = os.path.join(DATA_PATH, dir_path)
     abs_path = os.path.realpath(os.path.expanduser(dir_path))
     abs_data = os.path.realpath(os.path.expanduser(DATA_PATH))
     if abs_path.startswith(abs_data + os.sep) or abs_path == abs_data:

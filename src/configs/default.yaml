@@ -65,3 +65,45 @@ mcp:
       description: Web search, bash commands, file operations, and document tools
       url: http://127.0.0.1:18201/sse
       enabled: true
+
+    - name: VLMToolsMCPServer
+      description: "MCP server for vision-language model tools"
+      url: http://127.0.0.1:18222/sse
+      enabled: true
+
+# Middleware chain configuration
+# Each middleware can be individually enabled/disabled
+middleware:
+  memory:
+    enabled: true
+    paths: ["./AGENTS.md"]
+    memory_dirs: []
+  skills:
+    enabled: true
+    paths: []  # Add skill directories, e.g. ["~/.onit/skills"]
+  patch_tool_calls:
+    enabled: true
+  summarization:
+    enabled: true
+    micro_compact_keep: 3
+    # auto_compact_threshold is auto-calculated as 85% of serving.max_tokens
+    # Override manually here if needed (e.g. 100000)
+    # auto_compact_threshold: 100000
+  todos:
+    enabled: true
+    max_items: 20
+    nag_interval: 3
+  tasks:
+    enabled: true
+    dir: ".tasks"
+  filesystem:
+    enabled: false  # Enable to expose backend file tools
+  background:
+    enabled: false  # Enable for background task execution
+  subagents:
+    enabled: true
+    max_iterations: 30
+  teams:
+    enabled: false
+  worktree:
+    enabled: false

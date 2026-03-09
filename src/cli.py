@@ -390,9 +390,19 @@ def _mcp_servers_ready(config_data: dict, timeout: float = 15.0) -> bool:
 
 def _start_mcp_servers_background(log_level='ERROR'):
     """Start MCP servers in a daemon thread. Blocks forever (runs in background)."""
+    import io
     from .mcp.servers.run import run_servers
     try:
-        run_servers(log_level=log_level)
+        # Redirect stdout/stderr to suppress FastMCP banners and INFO logs
+        devnull = io.StringIO()
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout = devnull
+        sys.stderr = devnull
+        try:
+            run_servers(log_level=log_level)
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
     except Exception:
         pass
 
@@ -479,7 +489,7 @@ def main():
                               help="Display current configuration.")
 
     # General options
-    parser.add_argument('--config', type=str, default=None,
+    parser.add_argument('--config', '--default', type=str, default=None,
                         help='Path to the configuration YAML file.')
     parser.add_argument('--host', type=str, default=None,
                         help='LLM serving host URL (e.g. http://localhost:8000/v1). Overrides config and ONIT_HOST env var.')
@@ -487,7 +497,7 @@ def main():
                         help='Enable verbose logging.')
     parser.add_argument('--timeout', type=int, default=None,
                         help='Request timeout in seconds (-1 for no timeout).')
-    parser.add_argument('--template-path', type=str, default=None,
+    parser.add_argument('--template-path', '--template', type=str, default=None,
                         help='Path to custom prompt template YAML file.')
     parser.add_argument('--documents-path', type=str, default=None,
                         help='Path to local documents directory. The model will search here before the web.')
@@ -500,9 +510,10 @@ def main():
                         help='Text UI theme (e.g. "white", "dark").')
     parser.add_argument('--show-logs', action='store_true', default=None,
                         help='Show execution logs.')
-    parser.add_argument('--no-stream', action='store_true', default=None,
-                        dest='no_stream',
-                        help='Disable streaming of tokens (streaming is enabled by default for text, web and a2a modes).')
+    parser.add_argument('--stream', action='store_true', default=None,
+                        help='Enable streaming of tokens in the TUI.')
+    parser.add_argument('--show-thinking', action='store_true', default=None,
+                        help='Show model thinking/reasoning tokens (italicized, greyed).')
 
     # Web UI options
     parser.add_argument('--web', action='store_true', default=None,
@@ -634,9 +645,13 @@ def main():
         if value is not None:
             config_data[config_key] = value
 
-    # --no-stream explicitly disables streaming (default is True)
-    if args.no_stream:
-        config_data['stream'] = False
+    # --stream explicitly enables streaming
+    if args.stream:
+        config_data['stream'] = True
+
+    # --show-thinking explicitly enables display of reasoning tokens
+    if args.show_thinking:
+        config_data['show_thinking'] = True
 
     # --host overrides serving.host in config
     if args.host:
@@ -685,11 +700,13 @@ def main():
         sys.exit(1)
 
     # Check OLLAMA_API_KEY for web search support
+    _startup_warnings = []
     ollama_api_key = _resolve_credential(
         args.ollama_api_key, 'OLLAMA_API_KEY', 'ollama_api_key')
     if ollama_api_key:
         os.environ['OLLAMA_API_KEY'] = ollama_api_key
     else:
+        _startup_warnings.append("OLLAMA_API_KEY is not set. Web search tool will be disabled.")
         os.environ['ONIT_DISABLE_WEB_SEARCH'] = '1'
 
     # Check OPENWEATHERMAP_API_KEY for weather tool support
@@ -702,6 +719,7 @@ def main():
     if weather_api_key:
         os.environ['OPENWEATHERMAP_API_KEY'] = weather_api_key
     else:
+        _startup_warnings.append("OPENWEATHERMAP_API_KEY is not set. Weather tool will be disabled.")
         os.environ['ONIT_DISABLE_WEATHER'] = '1'
 
     # Resolve gateway type and token
@@ -747,31 +765,60 @@ def main():
 
         config_data['gateway'] = gateway_type
 
-    # Auto-start MCP servers if not already running
-    _ensure_mcp_servers(
-        config_data,
-        log_level='DEBUG' if config_data.get('verbose') else 'ERROR',
+    # Determine if we should launch the interactive TUI
+    is_interactive_text = not any(
+        config_data.get(k) for k in ('web', 'a2a', 'gateway', 'client')
     )
 
-    # Print tool availability warnings before launching any mode
-    if os.environ.get('ONIT_DISABLE_WEATHER'):
-        print("Warning: OPENWEATHERMAP_API_KEY is not set. Weather tool is unavailable.",
-              file=sys.stderr)
-        print("  Set via env var, --openweathermap-api-key, or run: onit setup\n",
-              file=sys.stderr)
-    if os.environ.get('ONIT_DISABLE_WEB_SEARCH'):
-        print("WARNING: OLLAMA_API_KEY is not set or invalid. "
-              "Internet search is DISABLED.", file=sys.stderr)
-        print("  OnIt will NOT be able to search the web in this session.",
-              file=sys.stderr)
-        print("  Set via env var, --ollama-api-key, or run: onit setup\n",
-              file=sys.stderr)
+    # Print tool availability warnings before launching any non-TUI mode
+    if not is_interactive_text:
+        if os.environ.get('ONIT_DISABLE_WEATHER'):
+            print("Warning: OPENWEATHERMAP_API_KEY is not set. Weather tool is unavailable.",
+                  file=sys.stderr)
+            print("  Set via env var, --openweathermap-api-key, or run: onit setup\n",
+                  file=sys.stderr)
+        if os.environ.get('ONIT_DISABLE_WEB_SEARCH'):
+            print("WARNING: OLLAMA_API_KEY is not set or invalid. "
+                  "Internet search is DISABLED.", file=sys.stderr)
+            print("  OnIt will NOT be able to search the web in this session.",
+                  file=sys.stderr)
+            print("  Set via env var, --ollama-api-key, or run: onit setup\n",
+                  file=sys.stderr)
 
-    onit = OnIt(config=config_data)
-    if config_data.get('gateway'):
-        onit.run_gateway_sync()
+    # Auto-start MCP servers if not already running
+    # Suppress stdout/stderr for TUI mode to avoid FastMCP banners polluting the terminal
+    if is_interactive_text:
+        import io as _io
+        _saved_out, _saved_err = sys.stdout, sys.stderr
+        sys.stdout = _io.StringIO()
+        sys.stderr = _io.StringIO()
+    try:
+        _ensure_mcp_servers(
+            config_data,
+            log_level='DEBUG' if config_data.get('verbose') else 'ERROR',
+        )
+    finally:
+        if is_interactive_text:
+            sys.stdout = _saved_out
+            sys.stderr = _saved_err
+
+    if is_interactive_text:
+        from .tui import OnitApp
+        config_data['tui'] = True
+        onit = OnIt(config=config_data)
+        app = OnitApp(
+            onit,
+            stream_enabled=config_data.get('stream', False),
+            show_thinking=config_data.get('show_thinking', False),
+            startup_warnings=_startup_warnings,
+        )
+        app.run()
     else:
-        asyncio.run(onit.run())
+        onit = OnIt(config=config_data)
+        if config_data.get('gateway'):
+            onit.run_gateway_sync()
+        else:
+            asyncio.run(onit.run())
 
 
 if __name__ == "__main__":
