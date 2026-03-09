@@ -44,9 +44,12 @@ You are an autonomous agent with access to tools and a file system.
 
 ## Context
 - **Today's date**: {current_date}
-- **Working directory**: {data_path} — sandbox folder for reading and writing files. 
+- **Working directory**: `{data_path}` — this is your sandbox for ALL file operations.
 
-## Constraints
+## File path rules
+- ALWAYS use the full absolute path `{data_path}/` when calling any file tool (read_file, write_file, send_file, search_document, search_directory, find_files, extract_tables, get_document_context, bash).
+- Example: `read_file(path="{data_path}/report.pdf")`, NOT `read_file(path="report.pdf")`.
+- NEVER use relative paths. NEVER use a shorter path like the parent directory.
 - NEVER create or modify files outside of `{data_path}`.
 
 ## Task
