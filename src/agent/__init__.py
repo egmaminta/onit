@@ -1,9 +1,15 @@
-"""OnIt agent core — loop, tool execution."""
+"""OnIt agent core — loop, tool execution, tasks, events."""
 
 from .loop import AgentLoop  # noqa: F401
 from .tool_executor import ToolExecutor  # noqa: F401
+from .tasks import TaskManager, Task, TaskStatus  # noqa: F401
+from .event_bus import EventBus  # noqa: F401
 
 __all__ = [
     "AgentLoop",
     "ToolExecutor",
+    "TaskManager",
+    "Task",
+    "TaskStatus",
+    "EventBus",
 ]
