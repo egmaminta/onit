@@ -3,6 +3,8 @@ CLI entry point for the OnIt agent.
 
 Usage:
     onit                        # interactive terminal chat
+    onit setup                  # interactive setup wizard
+    onit setup --show           # show current configuration
     onit --web                  # Gradio web UI
     onit --gateway              # Telegram bot gateway
     onit --config my.yaml       # custom config
@@ -388,9 +390,19 @@ def _mcp_servers_ready(config_data: dict, timeout: float = 15.0) -> bool:
 
 def _start_mcp_servers_background(log_level='ERROR'):
     """Start MCP servers in a daemon thread. Blocks forever (runs in background)."""
+    import io
     from .mcp.servers.run import run_servers
     try:
-        run_servers(log_level=log_level)
+        # Redirect stdout/stderr to suppress FastMCP banners and INFO logs
+        devnull = io.StringIO()
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout = devnull
+        sys.stderr = devnull
+        try:
+            run_servers(log_level=log_level)
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
     except Exception:
         pass
 
@@ -433,13 +445,51 @@ def _ensure_mcp_servers(config_data: dict, log_level='ERROR'):
               file=sys.stderr)
 
 
+def _merge_base(override: dict, base: dict):
+    """Recursively merge *override* into *base* (in-place).
+
+    Values from *override* take precedence.  For nested dicts the merge
+    is recursive so that e.g. ``serving.host`` from the override replaces
+    only that key, not the entire ``serving`` block.
+    """
+    for key, value in override.items():
+        if (key in base
+                and isinstance(base[key], dict)
+                and isinstance(value, dict)):
+            _merge_base(value, base[key])
+        else:
+            base[key] = value
+
+
+def _resolve_credential(cli_value: str | None,
+                        env_var: str | None,
+                        keyring_key: str) -> str | None:
+    """Resolve a credential: CLI arg > env var > keyring > None."""
+    if cli_value:
+        return cli_value
+    if env_var:
+        val = os.environ.get(env_var)
+        if val:
+            return val
+    from .setup import get_secret
+    return get_secret(keyring_key)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="onit",
         description="OnIt — an intelligent agent for task automation and assistance.",
     )
+
+    # Subcommands (setup)
+    subparsers = parser.add_subparsers(dest="command")
+    setup_parser = subparsers.add_parser("setup",
+                                         help="Interactive setup wizard.")
+    setup_parser.add_argument("--show", action="store_true",
+                              help="Display current configuration.")
+
     # General options
-    parser.add_argument('--config', type=str, default=None,
+    parser.add_argument('--config', '--default', type=str, default=None,
                         help='Path to the configuration YAML file.')
     parser.add_argument('--host', type=str, default=None,
                         help='LLM serving host URL (e.g. http://localhost:8000/v1). Overrides config and ONIT_HOST env var.')
@@ -447,7 +497,7 @@ def main():
                         help='Enable verbose logging.')
     parser.add_argument('--timeout', type=int, default=None,
                         help='Request timeout in seconds (-1 for no timeout).')
-    parser.add_argument('--template-path', type=str, default=None,
+    parser.add_argument('--template-path', '--template', type=str, default=None,
                         help='Path to custom prompt template YAML file.')
     parser.add_argument('--documents-path', type=str, default=None,
                         help='Path to local documents directory. The model will search here before the web.')
@@ -460,9 +510,10 @@ def main():
                         help='Text UI theme (e.g. "white", "dark").')
     parser.add_argument('--show-logs', action='store_true', default=None,
                         help='Show execution logs.')
-    parser.add_argument('--no-stream', action='store_true', default=None,
-                        dest='no_stream',
-                        help='Disable streaming of tokens (streaming is enabled by default for text, web and a2a modes).')
+    parser.add_argument('--stream', action='store_true', default=None,
+                        help='Enable streaming of tokens in the TUI.')
+    parser.add_argument('--show-thinking', action='store_true', default=None,
+                        help='Show model thinking/reasoning tokens (italicized, greyed).')
 
     # Web UI options
     parser.add_argument('--web', action='store_true', default=None,
@@ -513,6 +564,12 @@ def main():
                              'Example: --mcp-sse http://localhost:8080/sse')
     args = parser.parse_args()
 
+    # Setup wizard
+    if args.command == "setup":
+        from .setup import run_setup
+        run_setup(show_only=args.show)
+        return
+
     # Client mode: send task to remote A2A server and exit
     if args.a2a_client:
         if not args.a2a_task:
@@ -549,6 +606,19 @@ def main():
             print(f"Warning: config file '{args.config}' not found, using defaults.",
                   file=sys.stderr)
 
+    # Merge ~/.onit/config.yaml (from 'onit setup') as a base layer.
+    # Setup values fill in gaps but never override the project/user config.
+    from .setup import CONFIG_PATH as _setup_config_path
+    _resolved_config = os.path.realpath(config_path) if os.path.isfile(config_path) else None
+    _setup_resolved = os.path.realpath(_setup_config_path)
+    if (_resolved_config != _setup_resolved
+            and os.path.isfile(_setup_config_path)):
+        with open(_setup_config_path, 'r') as f:
+            setup_data = yaml.safe_load(f) or {}
+        # Deep-merge: setup_data is the base, config_data overrides
+        _merge_base(config_data, setup_data)
+        config_data = setup_data
+
     # override config with CLI args (only if explicitly provided)
     arg_to_config = {
         'a2a_loop': 'loop',
@@ -575,9 +645,13 @@ def main():
         if value is not None:
             config_data[config_key] = value
 
-    # --no-stream explicitly disables streaming (default is True)
-    if args.no_stream:
-        config_data['stream'] = False
+    # --stream explicitly enables streaming
+    if args.stream:
+        config_data['stream'] = True
+
+    # --show-thinking explicitly enables display of reasoning tokens
+    if args.show_thinking:
+        config_data['show_thinking'] = True
 
     # --host overrides serving.host in config
     if args.host:
@@ -603,49 +677,58 @@ def main():
     host = serving.get('host') or os.environ.get('ONIT_HOST')
     host_key = serving.get('host_key', '')
 
+    # Resolve host_key from keyring if not set via config/env
+    if not host_key or host_key == 'EMPTY':
+        kr_key = _resolve_credential(None, 'OPENROUTER_API_KEY', 'host_key')
+        if kr_key:
+            host_key = kr_key
+            config_data.setdefault('serving', {})['host_key'] = host_key
+
     missing = []
     if not host:
-        missing.append('ONIT_HOST (or set serving.host in config)')
+        missing.append('ONIT_HOST (or set serving.host in config, or run: onit setup)')
     elif 'openrouter' in (host or '').lower():
-        if not host_key and not os.environ.get('OPENROUTER_API_KEY'):
-            missing.append('OPENROUTER_API_KEY (or set serving.host_key in config)')
+        if not host_key:
+            missing.append('OPENROUTER_API_KEY (or run: onit setup)')
 
     if missing:
         print("Error: missing required configuration:", file=sys.stderr)
         for var in missing:
             print(f"  - {var}", file=sys.stderr)
-        print("\nSet via environment variable, CLI option (--host), or in your config YAML.", file=sys.stderr)
+        print("\nSet via environment variable, CLI option (--host), config YAML, "
+              "or run: onit setup", file=sys.stderr)
         sys.exit(1)
 
     # Check OLLAMA_API_KEY for web search support
-    ollama_api_key = args.ollama_api_key or os.environ.get('OLLAMA_API_KEY')
+    _startup_warnings = []
+    ollama_api_key = _resolve_credential(
+        args.ollama_api_key, 'OLLAMA_API_KEY', 'ollama_api_key')
     if ollama_api_key:
         os.environ['OLLAMA_API_KEY'] = ollama_api_key
     else:
-        print("Warning: OLLAMA_API_KEY is not set. Web search tool will be disabled.",
-              file=sys.stderr)
-        print("Set via environment variable or --ollama-api-key CLI option.",
-              file=sys.stderr)
+        _startup_warnings.append("OLLAMA_API_KEY is not set. Web search tool will be disabled.")
         os.environ['ONIT_DISABLE_WEB_SEARCH'] = '1'
 
     # Check OPENWEATHERMAP_API_KEY for weather tool support
-    weather_api_key = (args.openweathermap_api_key
-                       or os.environ.get('OPENWEATHERMAP_API_KEY')
-                       or os.environ.get('OPENWEATHER_API_KEY'))
+    weather_api_key = _resolve_credential(
+        args.openweathermap_api_key, 'OPENWEATHERMAP_API_KEY',
+        'openweathermap_api_key')
+    if not weather_api_key:
+        weather_api_key = _resolve_credential(
+            None, 'OPENWEATHER_API_KEY', 'openweathermap_api_key')
     if weather_api_key:
         os.environ['OPENWEATHERMAP_API_KEY'] = weather_api_key
     else:
-        print("Warning: OPENWEATHERMAP_API_KEY is not set. Weather tool will be disabled.",
-              file=sys.stderr)
-        print("Set via environment variable or --openweathermap-api-key CLI option.",
-              file=sys.stderr)
+        _startup_warnings.append("OPENWEATHERMAP_API_KEY is not set. Weather tool will be disabled.")
         os.environ['ONIT_DISABLE_WEATHER'] = '1'
 
     # Resolve gateway type and token
     gateway_type = config_data.get('gateway')
     if gateway_type:
-        telegram_token = os.environ.get('TELEGRAM_BOT_TOKEN')
-        viber_token = os.environ.get('VIBER_BOT_TOKEN')
+        telegram_token = _resolve_credential(
+            None, 'TELEGRAM_BOT_TOKEN', 'telegram_bot_token')
+        viber_token = _resolve_credential(
+            None, 'VIBER_BOT_TOKEN', 'viber_bot_token')
 
         if gateway_type == 'auto':
             # Auto-detect: prefer Telegram for backward compat, fall back to Viber
@@ -682,17 +765,60 @@ def main():
 
         config_data['gateway'] = gateway_type
 
-    # Auto-start MCP servers if not already running
-    _ensure_mcp_servers(
-        config_data,
-        log_level='DEBUG' if config_data.get('verbose') else 'ERROR',
+    # Determine if we should launch the interactive TUI
+    is_interactive_text = not any(
+        config_data.get(k) for k in ('web', 'a2a', 'gateway', 'client')
     )
 
-    onit = OnIt(config=config_data)
-    if config_data.get('gateway'):
-        onit.run_gateway_sync()
+    # Print tool availability warnings before launching any non-TUI mode
+    if not is_interactive_text:
+        if os.environ.get('ONIT_DISABLE_WEATHER'):
+            print("Warning: OPENWEATHERMAP_API_KEY is not set. Weather tool is unavailable.",
+                  file=sys.stderr)
+            print("  Set via env var, --openweathermap-api-key, or run: onit setup\n",
+                  file=sys.stderr)
+        if os.environ.get('ONIT_DISABLE_WEB_SEARCH'):
+            print("WARNING: OLLAMA_API_KEY is not set or invalid. "
+                  "Internet search is DISABLED.", file=sys.stderr)
+            print("  OnIt will NOT be able to search the web in this session.",
+                  file=sys.stderr)
+            print("  Set via env var, --ollama-api-key, or run: onit setup\n",
+                  file=sys.stderr)
+
+    # Auto-start MCP servers if not already running
+    # Suppress stdout/stderr for TUI mode to avoid FastMCP banners polluting the terminal
+    if is_interactive_text:
+        import io as _io
+        _saved_out, _saved_err = sys.stdout, sys.stderr
+        sys.stdout = _io.StringIO()
+        sys.stderr = _io.StringIO()
+    try:
+        _ensure_mcp_servers(
+            config_data,
+            log_level='DEBUG' if config_data.get('verbose') else 'ERROR',
+        )
+    finally:
+        if is_interactive_text:
+            sys.stdout = _saved_out
+            sys.stderr = _saved_err
+
+    if is_interactive_text:
+        from .tui import OnitApp
+        config_data['tui'] = True
+        onit = OnIt(config=config_data)
+        app = OnitApp(
+            onit,
+            stream_enabled=config_data.get('stream', False),
+            show_thinking=config_data.get('show_thinking', False),
+            startup_warnings=_startup_warnings,
+        )
+        app.run()
     else:
-        asyncio.run(onit.run())
+        onit = OnIt(config=config_data)
+        if config_data.get('gateway'):
+            onit.run_gateway_sync()
+        else:
+            asyncio.run(onit.run())
 
 
 if __name__ == "__main__":

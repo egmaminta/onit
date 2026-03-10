@@ -25,6 +25,7 @@ classifiers = [
 
 dependencies = [
     "rich",
+    "textual>=0.80.0",
     "requests",
     "pyyaml",
     "pydantic",
@@ -40,6 +41,7 @@ dependencies = [
     "ollama",
     "urllib3",
     "PyMuPDF",
+    "keyring",
 ]
 
 [project.optional-dependencies]
@@ -82,4 +84,5 @@ include = ["src*"]
     "mcp/prompts/prompt_templates/*.yaml",
     "mcp/servers/configs/*.yaml",
     "configs/*.yaml",
+    "tui/*.tcss",
 ]

@@ -47,7 +47,7 @@ from .model.serving.chat import chat
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
-from a2a.types import FilePart, FileWithBytes, TaskState, TaskStatus, TaskStatusUpdateEvent
+from a2a.types import FilePart, FileWithBytes
 from a2a.utils import new_agent_text_message
 
 AGENT_CURSOR = "OnIt"
@@ -243,25 +243,6 @@ class OnItA2AExecutor(AgentExecutor):
         current_task_id = id(asyncio.current_task())
         self._active_safety_queues[current_task_id] = session["safety_queue"]
 
-        # Stream partial progress back to the A2A client as "working" status events
-        _task_id = context.task_id or ""
-        _context_id = context.context_id or ""
-
-        async def _a2a_stream_callback(_token, full_content):
-            try:
-                event = TaskStatusUpdateEvent(
-                    taskId=_task_id,
-                    contextId=_context_id,
-                    final=False,
-                    status=TaskStatus(
-                        state=TaskState.working,
-                        message=new_agent_text_message(full_content),
-                    ),
-                )
-                await event_queue.enqueue_event(event)
-            except Exception:
-                pass  # best-effort streaming
-
         try:
             _stats = {}
             _task_start = time.monotonic()
@@ -271,8 +252,6 @@ class OnItA2AExecutor(AgentExecutor):
                 session_path=session["session_path"],
                 data_path=session["data_path"],
                 safety_queue=session["safety_queue"],
-                stream_callback=_a2a_stream_callback,
-                stream_throttle=10,
                 stats=_stats,
             )
             _task_elapsed = time.monotonic() - _task_start
@@ -382,7 +361,6 @@ class OnIt(BaseModel):
     prompt_intro: str | None = Field(default=None)
     timeout: int | None = Field(default=None)
     show_logs: bool = Field(default=False)
-    stream: bool = Field(default=True)
     loop: bool = Field(default=False)
     period: float = Field(default=10.0)
     task: str | None = Field(default=None)
@@ -403,6 +381,7 @@ class OnIt(BaseModel):
     prompt_url: str | None = Field(default=None, exclude=True)
     file_server_url: str | None = Field(default=None, exclude=True)
     chat_ui: Any | None = Field(default=None, exclude=True)
+    middleware_chain: Any | None = Field(default=None, exclude=True)
 
     def __init__(self, config: Union[str, os.PathLike[str], dict[str, Any], None] = None) -> None :
         super().__init__()
@@ -441,9 +420,13 @@ class OnIt(BaseModel):
                     banner = "OnIt Agent to Agent Server"
                 elif self.gateway:
                     banner = f"OnIt {self.gateway.capitalize()} Gateway"
+                elif self.config_data.get('tui'):
+                    # TUI mode: the app will set chat_ui itself
+                    self.chat_ui = None
                 else:
                     banner = "OnIt Chat Interface"
-                self.chat_ui = ChatUI(self.theme, show_logs=self.show_logs, banner_title=banner)
+                if self.chat_ui is None and not self.config_data.get('tui'):
+                    self.chat_ui = ChatUI(self.theme, show_logs=self.show_logs, banner_title=banner)
         
     def initialize(self):
         self.mcp_servers = self.config_data['mcp']['servers'] if 'mcp' in self.config_data and 'servers' in self.config_data['mcp'] else []
@@ -547,7 +530,6 @@ class OnIt(BaseModel):
         if self.timeout is not None and self.timeout < 0:
             self.timeout = None  # no timeout
         self.show_logs = self.config_data.get('show_logs', False)
-        self.stream = self.config_data.get('stream', True)
         self.loop = self.config_data.get('loop', False)
         self.period = float(self.config_data.get('period', 20.0))
         self.task = self.config_data.get('task', None)
@@ -570,6 +552,115 @@ class OnIt(BaseModel):
         self.gateway_token = self.config_data.get('gateway_token', None)
         self.viber_webhook_url = self.config_data.get('viber_webhook_url', None)
         self.viber_port = self.config_data.get('viber_port', 8443)
+
+        # ── Build middleware chain from config ─────────────────────
+        self.middleware_chain = self._build_middleware_chain()
+
+    def _build_middleware_chain(self):
+        """Build the middleware chain based on config.
+
+        Each middleware can be disabled via ``middleware.<name>.enabled: false``
+        in the YAML config.
+        """
+        from .middleware import MiddlewareChain
+
+        mw_config = self.config_data.get('middleware', {})
+        chain = MiddlewareChain()
+
+        # Memory middleware — loads AGENTS.md + memory dirs
+        mem_cfg = mw_config.get('memory', {})
+        if mem_cfg.get('enabled', True):
+            from .middleware.memory import MemoryMiddleware
+            agents_paths = mem_cfg.get('paths', ['./AGENTS.md'])
+            memory_dirs = mem_cfg.get('memory_dirs', [])
+            chain.add(MemoryMiddleware(
+                agents_md_paths=agents_paths,
+                memory_dirs=memory_dirs,
+            ))
+
+        # Skills middleware — progressive skill disclosure
+        skills_cfg = mw_config.get('skills', {})
+        if skills_cfg.get('enabled', True):
+            from .middleware.skills import SkillsMiddleware
+            skill_dirs = skills_cfg.get('paths', [])
+            if skill_dirs:
+                chain.add(SkillsMiddleware(skill_dirs=skill_dirs))
+
+        # Patch tool calls — fix dangling tool_calls
+        patch_cfg = mw_config.get('patch_tool_calls', {})
+        if patch_cfg.get('enabled', True):
+            from .middleware.patch_tool_calls import PatchToolCallsMiddleware
+            chain.add(PatchToolCallsMiddleware())
+
+        # Summarization — context compaction
+        sum_cfg = mw_config.get('summarization', {})
+        if sum_cfg.get('enabled', True):
+            from .middleware.summarization import SummarizationMiddleware
+            kwargs = {'keep_last_n': sum_cfg.get('micro_compact_keep', 3)}
+            if 'auto_compact_threshold' in sum_cfg:
+                kwargs['token_threshold'] = sum_cfg['auto_compact_threshold']
+            chain.add(SummarizationMiddleware(**kwargs))
+
+        # Todo list — quick in-memory tracking
+        todo_cfg = mw_config.get('todos', {})
+        if todo_cfg.get('enabled', True):
+            from .middleware.todos import TodoListMiddleware
+            chain.add(TodoListMiddleware())
+
+        # Tasks — persistent task board
+        task_cfg = mw_config.get('tasks', {})
+        if task_cfg.get('enabled', True):
+            from .middleware.tasks import TaskMiddleware
+            chain.add(TaskMiddleware(
+                tasks_dir=task_cfg.get('dir', '.tasks'),
+            ))
+
+        # Filesystem middleware — backend bridge
+        fs_cfg = mw_config.get('filesystem', {})
+        if fs_cfg.get('enabled', False):
+            from .middleware.filesystem import FilesystemMiddleware
+            from .backend.filesystem import FilesystemBackend
+            backend = FilesystemBackend(root_dir=self.data_path)
+            chain.add(FilesystemMiddleware(backend=backend))
+
+        # Background tasks
+        bg_cfg = mw_config.get('background', {})
+        if bg_cfg.get('enabled', False):
+            from .middleware.background import BackgroundMiddleware
+            chain.add(BackgroundMiddleware())
+
+        # Sub-agents
+        sub_cfg = mw_config.get('subagents', {})
+        if sub_cfg.get('enabled', True):
+            from .middleware.subagents import SubAgentMiddleware
+            chain.add(SubAgentMiddleware())
+
+        # Teams — multi-agent team coordination
+        teams_cfg = mw_config.get('teams', {})
+        if teams_cfg.get('enabled', False):
+            from .agent.message_bus import MessageBus
+            from .agent.teammate import TeammateManager
+            from .agent.protocols import ShutdownProtocol, PlanApprovalProtocol
+            from .middleware.teams import TeamMiddleware
+            bus = MessageBus(base_dir=self.data_path)
+            tm = TeammateManager(bus=bus)
+            shutdown = ShutdownProtocol(bus=bus)
+            plan = PlanApprovalProtocol(bus=bus)
+            chain.add(TeamMiddleware(
+                bus=bus,
+                teammate_manager=tm,
+                shutdown_protocol=shutdown,
+                plan_protocol=plan,
+            ))
+
+        # Worktree — git worktree management
+        wt_cfg = mw_config.get('worktree', {})
+        if wt_cfg.get('enabled', False):
+            from .middleware.worktree import WorktreeMiddleware
+            chain.add(WorktreeMiddleware(repo_root=self.data_path))
+
+        return chain
+
     def load_session_history(self, max_turns: int = 20, session_path: str | None = None) -> list[dict]:
         """Load recent session history from the JSONL session file.
 
@@ -630,6 +721,7 @@ class OnIt(BaseModel):
                            data_path: str | None = None,
                            safety_queue: asyncio.Queue | None = None,
                            stream_callback=None,
+                           stream_complete_callback=None,
                            stream_throttle: int = 0,
                            stats: dict | None = None,
                            tool_status_callback=None) -> str:
@@ -644,6 +736,8 @@ class OnIt(BaseModel):
             stream_callback: Optional callback ``(token, full_content) -> None``
                 called for each streamed token so callers can deliver incremental
                 updates to their clients (web UI, A2A, etc.).
+            stream_complete_callback: Optional callback ``(content, tok_s) -> None``
+                called when a streaming phase ends (before tool calls begin).
             stream_throttle: When > 0, only invoke ``stream_callback`` every N
                 tokens to avoid flooding (useful for A2A SSE).
             tool_status_callback: Optional callback ``(status_text) -> None``
@@ -670,27 +764,37 @@ class OnIt(BaseModel):
             instruction = instruction.messages[0].content.text
 
         # Use a StreamingAdapter when streaming tokens or tracking tool status.
+        # process_task doesn't accept a stream_callback; streaming is handled by run().
+        stream_callback = None
         _adapter = None
-        if (stream_callback and self.stream) or tool_status_callback:
+        if stream_callback and self.stream:
             _adapter = StreamingAdapter(
-                on_token=stream_callback if self.stream else None,
+                on_token=stream_callback,
+                on_complete=stream_complete_callback,
                 show_logs=self.show_logs,
                 throttle_tokens=stream_throttle,
                 on_tool_status=tool_status_callback,
             )
+        elif tool_status_callback:
+            _adapter = StreamingAdapter(
+                on_token=None,
+                show_logs=self.show_logs,
+                throttle_tokens=0,
+                on_tool_status=tool_status_callback,
+            )
 
         kwargs = {
-            'console': None,
-            'chat_ui': _adapter,
+            'console': None, 'chat_ui': _adapter,
             'cursor': AGENT_CURSOR, 'memories': None,
-            'verbose': self.verbose or self.show_logs,
+            'verbose': self.verbose,
             'data_path': effective_data_path,
             'max_tokens': self.model_serving.get('max_tokens', 262144),
             'session_history': self.load_session_history(session_path=effective_session_path),
-            'stream': self.stream,
         }
         if self.prompt_intro:
             kwargs['prompt_intro'] = self.prompt_intro
+        if hasattr(self, 'middleware_chain') and self.middleware_chain:
+            kwargs['middleware_chain'] = self.middleware_chain
         last_response = await chat(
             host=self.model_serving["host"],
             host_key=self.model_serving.get("host_key", "EMPTY"),
@@ -769,6 +873,8 @@ class OnIt(BaseModel):
                           'data_path': self.data_path,
                           'max_tokens': self.model_serving.get('max_tokens', 262144),
                           'session_history': self.load_session_history()}
+                if hasattr(self, 'middleware_chain') and self.middleware_chain:
+                    kwargs['middleware_chain'] = self.middleware_chain
                 last_response = await chat(host=self.model_serving["host"],
                                             host_key=self.model_serving.get("host_key", "EMPTY"),
                                 
@@ -831,7 +937,7 @@ class OnIt(BaseModel):
             version="1.0.0",
             default_input_modes=["text"],
             default_output_modes=["text"],
-            capabilities=AgentCapabilities(streaming=self.stream),
+            capabilities=AgentCapabilities(streaming=False),
             skills=[AgentSkill(
                 id="general",
                 name="General Task",
@@ -908,8 +1014,7 @@ class OnIt(BaseModel):
 
         print(f"A2A server running at http://0.0.0.0:{self.a2a_port}/ (Ctrl+C to stop)")
 
-        _verbose_or_logs = self.verbose or self.show_logs
-        config = uvicorn.Config(wrapped_app, host="0.0.0.0", port=self.a2a_port, log_level="info" if _verbose_or_logs else "warning", access_log=_verbose_or_logs)
+        config = uvicorn.Config(wrapped_app, host="0.0.0.0", port=self.a2a_port, log_level="info" if self.verbose else "warning", access_log=self.verbose)
         server = uvicorn.Server(config)
         await server.serve()
 
@@ -1072,7 +1177,7 @@ class OnIt(BaseModel):
                         _tok_s = f" ({_tc / (time.monotonic() - _st):.1f} tok/s)"
                 elapsed_time = f"{elapsed_time:.2f} secs{_tok_s}"
                 response = remove_tags(response).strip()
-                # Skip empty responses — model returned nothing useful.
+                # Skip empty responses, model returned nothing useful.
                 if not response:
                     self.chat_ui.add_message(
                         "assistant",
@@ -1128,9 +1233,11 @@ class OnIt(BaseModel):
                           'data_path': self.data_path,
                           'max_tokens': self.model_serving.get('max_tokens', 262144),
                           'session_history': self.load_session_history(),
-                          'stream': self.stream}
+                          'stream': self.config_data.get('stream', False)}  # stream tokens when --stream flag is set
                 if self.prompt_intro:
                     kwargs['prompt_intro'] = self.prompt_intro
+                if hasattr(self, 'middleware_chain') and self.middleware_chain:
+                    kwargs['middleware_chain'] = self.middleware_chain
                 last_response = await chat(host=self.model_serving["host"],
                                             host_key=self.model_serving.get("host_key", "EMPTY"),
                                 
