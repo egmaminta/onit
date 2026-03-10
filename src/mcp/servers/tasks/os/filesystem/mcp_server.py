@@ -84,8 +84,12 @@ def _validate_required(**kwargs) -> str:
 
 
 def _validate_read_path(file_path: str) -> str:
-    """Validate that the path is within DATA_PATH. Returns resolved absolute path.
+    """Validate that the path is within DATA_PATH.
+    Relative paths are resolved against DATA_PATH (not CWD).
+    Returns resolved absolute path.
     Raises ValueError if outside allowed directory."""
+    if not os.path.isabs(os.path.expanduser(file_path)):
+        file_path = os.path.join(DATA_PATH, file_path)
     abs_path = os.path.realpath(os.path.expanduser(file_path))
     abs_data = os.path.realpath(os.path.expanduser(DATA_PATH))
     if abs_path.startswith(abs_data + os.sep) or abs_path == abs_data:
@@ -96,8 +100,12 @@ def _validate_read_path(file_path: str) -> str:
 
 
 def _validate_dir_path(dir_path: str) -> str:
-    """Validate a directory path is within DATA_PATH. Returns resolved absolute path.
+    """Validate a directory path is within DATA_PATH.
+    Relative paths are resolved against DATA_PATH (not CWD).
+    Returns resolved absolute path.
     Raises ValueError if outside allowed directory."""
+    if not os.path.isabs(os.path.expanduser(dir_path)):
+        dir_path = os.path.join(DATA_PATH, dir_path)
     abs_path = os.path.realpath(os.path.expanduser(dir_path))
     abs_data = os.path.realpath(os.path.expanduser(DATA_PATH))
     if abs_path.startswith(abs_data + os.sep) or abs_path == abs_data:
@@ -250,7 +258,7 @@ def _get_file_content(file_path: str) -> tuple[str, str]:
 Uses grep-like regex pattern matching and returns matching lines with surrounding context.
 
 IMPORTANT - Required parameters:
-- path: File path within data_path folder to search (e.g., "data_path/report.pdf", "data_path/README.md")
+- path: FULL absolute file path (e.g., "/tmp/onit/data/<session_id>/report.pdf"). Always use the complete working directory path from your system prompt — never use relative paths.
 - pattern: Regex search pattern to find in the document (e.g., "error.*timeout", "subjects")
   Do NOT use 'query' - the parameter name is 'pattern'.
 
@@ -261,13 +269,13 @@ Optional parameters:
 - max_matches: Maximum number of matches to return (default: 50).
   Do NOT use 'max_sections' - the parameter name is 'max_matches'.
 
-Example: search_document(path="data_path/report.pdf", pattern="conclusion")
+Example: search_document(path="/tmp/onit/data/<session_id>/report.pdf", pattern="conclusion")
 
 Returns JSON: {matches, total_matches, file, format, status}
 Each match includes: {line_number, match, context_before, context_after}"""
 )
 def search_document(
-    path: Annotated[Optional[str], Field(description="File path within data_path folder to search")] = None,
+    path: Annotated[Optional[str], Field(description="FULL absolute file path to search")] = None,
     pattern: Annotated[Optional[str], Field(description="Regex search pattern to find in the document (e.g., 'error.*timeout', 'subjects')")] = None,
     case_sensitive: Annotated[bool, Field(description="Whether search is case-sensitive")] = False,
     context_lines: Annotated[int, Field(description="Number of lines of context before/after each match")] = 3,
@@ -352,7 +360,7 @@ def search_document(
 Recursively searches text files matching the file pattern.
 
 Args:
-- directory: Directory within data_path folder to search (e.g., "data_path", "data_path/subdir")
+- directory: FULL absolute directory path (e.g., "/tmp/onit/data/<session_id>"). Always use the complete working directory path from your system prompt — never use relative paths.
 - pattern: Search pattern (regex with -E flag)
 - file_pattern: File glob pattern (default: "*" for all files)
 - case_sensitive: Case-sensitive search (default: false)
@@ -442,7 +450,7 @@ def search_directory(
 Tables are returned in a structured format with headers and rows.
 
 Args:
-- path: File path within data_path folder (e.g., "data_path/report.pdf", "data_path/README.md")
+- path: FULL absolute file path (e.g., "/tmp/onit/data/<session_id>/report.pdf"). Always use the complete working directory path from your system prompt — never use relative paths.
 - table_index: Specific table index to extract (1-based, default: all)
 - output_format: Output format - "json" or "markdown" (default: "json")
 
@@ -542,10 +550,10 @@ def extract_tables(
 @mcp.tool(
     title="Find Files",
     description="""Find files matching patterns using the find command.
-Searches recursively from the specified directory within data_path folder.
+Searches recursively from the specified directory.
 
 Args:
-- directory: Directory within data_path folder to search (default: data_path)
+- directory: FULL absolute directory path (e.g., "/tmp/onit/data/<session_id>"). Always use the complete working directory path from your system prompt — never use relative paths.
 - name_pattern: File name pattern (glob, e.g., "*.py", "test_*")
 - file_type: Type filter - "f" (file), "d" (directory), or None (all)
 - max_depth: Maximum directory depth (default: unlimited)
@@ -770,7 +778,7 @@ def transform_text(
 Searches for keywords and returns surrounding context that can support answers.
 
 Args:
-- path: Document path within data_path folder (text, PDF, or markdown)
+- path: FULL absolute file path (e.g., "/tmp/onit/data/<session_id>/document.pdf"). Always use the complete working directory path — never use relative paths.
 - query: The question or topic to find context for
 - keywords: Additional keywords to search (comma-separated)
 - context_chars: Characters of context around matches (default: 500)
