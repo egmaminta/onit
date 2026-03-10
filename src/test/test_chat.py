@@ -106,8 +106,8 @@ class TestChat:
             return_value=_mock_completion("The answer is 42.")
         )
 
-        with patch("model.serving.chat.AsyncOpenAI", return_value=mock_client), \
-             patch("model.serving.chat._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
+        with patch("agent.loop.AsyncOpenAI", return_value=mock_client), \
+             patch("agent.loop._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
             result = await chat(
                 host="http://localhost:8000/v1",
                 instruction="What is 6*7?",
@@ -123,8 +123,8 @@ class TestChat:
             return_value=_mock_completion("<think>pondering</think>Result here")
         )
 
-        with patch("model.serving.chat.AsyncOpenAI", return_value=mock_client), \
-             patch("model.serving.chat._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
+        with patch("agent.loop.AsyncOpenAI", return_value=mock_client), \
+             patch("agent.loop._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
             result = await chat(
                 host="http://localhost:8000/v1",
                 instruction="test",
@@ -143,8 +143,8 @@ class TestChat:
             return_value=_mock_completion("should not reach")
         )
 
-        with patch("model.serving.chat.AsyncOpenAI", return_value=mock_client), \
-             patch("model.serving.chat._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
+        with patch("agent.loop.AsyncOpenAI", return_value=mock_client), \
+             patch("agent.loop._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
             result = await chat(
                 host="http://localhost:8000/v1",
                 instruction="test",
@@ -162,8 +162,8 @@ class TestChat:
             side_effect=APITimeoutError(request=MagicMock())
         )
 
-        with patch("model.serving.chat.AsyncOpenAI", return_value=mock_client), \
-             patch("model.serving.chat._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
+        with patch("agent.loop.AsyncOpenAI", return_value=mock_client), \
+             patch("agent.loop._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
             result = await chat(
                 host="http://localhost:8000/v1",
                 instruction="test",
@@ -181,8 +181,8 @@ class TestChat:
             side_effect=OpenAIError("fail")
         )
 
-        with patch("model.serving.chat.AsyncOpenAI", return_value=mock_client), \
-             patch("model.serving.chat._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
+        with patch("agent.loop.AsyncOpenAI", return_value=mock_client), \
+             patch("agent.loop._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
             result = await chat(
                 host="http://localhost:8000/v1",
                 instruction="test",
@@ -213,8 +213,8 @@ class TestChat:
         mock_registry.tools = {"search"}
         mock_registry.__getitem__ = MagicMock(return_value=mock_handler)
 
-        with patch("model.serving.chat.AsyncOpenAI", return_value=mock_client), \
-             patch("model.serving.chat._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
+        with patch("agent.loop.AsyncOpenAI", return_value=mock_client), \
+             patch("agent.loop._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
             result = await chat(
                 host="http://localhost:8000/v1",
                 instruction="What is the weather?",
@@ -235,8 +235,8 @@ class TestChat:
 
         history = [{"task": "prior question", "response": "prior answer"}]
 
-        with patch("model.serving.chat.AsyncOpenAI", return_value=mock_client), \
-             patch("model.serving.chat._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
+        with patch("agent.loop.AsyncOpenAI", return_value=mock_client), \
+             patch("agent.loop._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
             await chat(
                 host="http://localhost:8000/v1",
                 instruction="follow up",
@@ -263,8 +263,8 @@ class TestChat:
             return_value=_mock_completion("ok")
         )
 
-        with patch("model.serving.chat.AsyncOpenAI", return_value=mock_client), \
-             patch("model.serving.chat._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
+        with patch("agent.loop.AsyncOpenAI", return_value=mock_client), \
+             patch("agent.loop._resolve_model_id", new_callable=AsyncMock, return_value="test-model"):
             await chat(
                 host="http://localhost:8000/v1",
                 instruction="hello",
