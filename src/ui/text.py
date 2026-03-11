@@ -140,6 +140,8 @@ class ChatUI:
         self._tag_buf = ""  # buffer for partial tag detection across tokens
         self._trail_buf = ""  # buffer whitespace-only tokens to suppress trailing blank lines
         self._stream_cursor_shown = False  # blinking block cursor during streaming
+        self._link_buf = ""  # buffer for detecting markdown links during streaming
+        self._link_state = 0  # 0=normal, 1=in label [..., 2=after ](, eating URL
         self._stream_token_count = 0  # token counter for tok/s calculation
         self._stream_start_time = 0.0  # monotonic time when streaming started
         self.initialize()
@@ -442,6 +444,15 @@ class ChatUI:
         content.append(f"{msg_content}\n", style="white")
         content.append("└" + "─" * 40 + "\n", style=self.theme.styles.get("user", "cyan"))
 
+    @staticmethod
+    def _strip_markdown_links(text: str) -> str:
+        """Replace markdown links with just their display text.
+
+        Handles regular URLs and data-URIs so the terminal doesn't show
+        huge base64 blobs.  ``[label](url)`` → ``label``
+        """
+        return re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+
     def _render_assistant_message(self, content: Text, msg_content: str, msg_time: str, msg_elapsed: str) -> None:
         """
         Render an assistant message to the content Text object.
@@ -458,6 +469,7 @@ class ChatUI:
         if msg_elapsed:
             content.append(f" - {msg_elapsed}", style=self.theme.styles.get("warning", "dim magenta"))
         content.append("\n", style=self.theme.styles.get("warning", "dim magenta"))
+        msg_content = self._strip_markdown_links(msg_content)
         content.append(f"{msg_content}\n", style="bright_white")
         content.append("└" + "─" * 40 + "\n", style=self.theme.styles.get("assistant", "magenta"))
 
@@ -633,6 +645,8 @@ class ChatUI:
         self._stream_pending = ""
         self._stream_think_started = False
         self._tag_buf = ""
+        self._link_buf = ""
+        self._link_state = 0
         self._stream_token_count = 0
         self._stream_start_time = time.monotonic()
 
@@ -660,6 +674,7 @@ class ChatUI:
         if self._stream_think_started:
             self.stream_think_end()  # reasoning just finished, close think block
         display = self._filter_display_token(token)
+        display = self._filter_markdown_links(display)
         if not display:
             return
         self._erase_stream_cursor()
@@ -698,6 +713,58 @@ class ChatUI:
         self._tag_buf = ""
         return buf
 
+    def _filter_markdown_links(self, text: str) -> str:
+        """Filter markdown links from streaming tokens.
+
+        Buffers ``[label](url)`` patterns across token boundaries and emits
+        only the label text, suppressing the URL (which may be a huge
+        data-URI).  State machine: 0=normal, 1=inside label ``[…``,
+        2=consuming URL after ``](``.
+        """
+        out = []
+        for ch in text:
+            if self._link_state == 0:
+                if ch == '[':
+                    self._link_state = 1
+                    self._link_buf = ""
+                else:
+                    out.append(ch)
+            elif self._link_state == 1:
+                if ch == ']':
+                    # Peek-ahead not possible across tokens; buffer the label
+                    # and move to a transition state.  We abuse _link_state=2
+                    # but first need to see '('.
+                    self._link_state = 2
+                elif ch == '\n':
+                    # Newline inside bracket — not a link, flush as literal
+                    out.append('[')
+                    out.append(self._link_buf)
+                    out.append(ch)
+                    self._link_buf = ""
+                    self._link_state = 0
+                else:
+                    self._link_buf += ch
+            elif self._link_state == 2:
+                if ch == '(':
+                    # Confirmed markdown link — consume URL until ')'
+                    self._link_state = 3
+                else:
+                    # Not a markdown link — flush buffered label as literal
+                    out.append('[')
+                    out.append(self._link_buf)
+                    out.append(']')
+                    out.append(ch)
+                    self._link_buf = ""
+                    self._link_state = 0
+            elif self._link_state == 3:
+                if ch == ')':
+                    # End of URL — emit only the label
+                    out.append(self._link_buf)
+                    self._link_buf = ""
+                    self._link_state = 0
+                # else: swallow URL characters
+        return "".join(out)
+
     def stream_end(self, elapsed: str = "") -> None:
         """Close the streamed block. Message saving is handled by onit.py (has correct elapsed)."""
         self._erase_stream_cursor()
@@ -708,6 +775,8 @@ class ChatUI:
             self._stream_pending = ""
             self._trail_buf = ""
             self._tag_buf = ""
+            self._link_buf = ""
+            self._link_state = 0
             return
         # Discard trailing whitespace — just emit a single newline before the footer
         self._trail_buf = ""
@@ -730,6 +799,8 @@ class ChatUI:
         self._streaming_content = ""
         self._stream_pending = ""
         self._tag_buf = ""
+        self._link_buf = ""
+        self._link_state = 0
         self._stream_header_printed = False
 
     def render(self, thinking: bool = False) -> Union[Panel, None]:
