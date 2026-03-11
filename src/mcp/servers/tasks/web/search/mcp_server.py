@@ -76,7 +76,7 @@ mcp = FastMCP("Web Search MCP Server")
 # Constants
 CONNECT_TIMEOUT = 10
 READ_TIMEOUT = 60
-MAX_SIZE = 100 * 1024 * 1024  # 100MB limit
+MAX_SIZE = 5 * 1024 * 1024  # 5MB limit
 
 # Data path for file creation (set via options['data_path'] in run())
 # All file writes are confined to this directory. Never use home folder.
@@ -160,7 +160,7 @@ def _read_pdf(url: str) -> str:
         pdf_file = BytesIO(response.content)
         reader = PdfReader(pdf_file)
         text = "\n".join(page.extract_text() or "" for page in reader.pages)
-        return text.strip()
+        return text.strip()[:50000]
     except Exception as e:
         return f"Error reading PDF: {str(e)}"
 

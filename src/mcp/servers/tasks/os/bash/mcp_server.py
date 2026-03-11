@@ -24,7 +24,7 @@ Requires:
 1. bash - Execute bash/shell commands with timeout and directory control
 2. read_file - Read files (text, PDF returns content; binary files return metadata only)
 3. write_file - Write content to files (supports write/append modes)
-4. send_file - Send a file to a remote client via callback URL or base64
+4. send_file - Send a file to a remote client via callback URL
 5. search_document - Search for patterns in a document (text, PDF, markdown)
 6. search_directory - Search for patterns across files in a directory
 7. extract_tables - Extract tables from documents (PDF, markdown)
@@ -36,8 +36,10 @@ Requires:
 import base64
 import json
 import os
+import platform
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 import requests
@@ -49,6 +51,23 @@ from fastmcp import FastMCP
 import logging
 logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+IS_WINDOWS = platform.system() == "Windows"
+
+# Locate a usable bash executable on Windows (Git Bash, WSL, etc.)
+_BASH_EXE = None
+if IS_WINDOWS:
+    _BASH_EXE = shutil.which("bash")
+    if not _BASH_EXE:
+        # Common Git Bash locations
+        for candidate in (
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Windows\System32\bash.exe",
+        ):
+            if os.path.isfile(candidate):
+                _BASH_EXE = candidate
+                break
 
 mcp = FastMCP("Bash MCP Server")
 
@@ -184,15 +203,50 @@ def _get_sandbox_env() -> dict:
     tmp_dir = os.path.join(abs_data, "tmp")
     _secure_makedirs(tmp_dir)
 
-    env = {
-        "TERM": "dumb",
-        "LANG": "en_US.UTF-8",
-        "LC_ALL": "en_US.UTF-8",
-        "HOME": abs_data,
-        "TMPDIR": tmp_dir,
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
-        "DATA_PATH": abs_data,
-    }
+    if IS_WINDOWS:
+        # Build PATH that includes Git Bash Unix tools + essential Windows paths
+        path_parts = []
+        # Git Bash provides Unix coreutils (wc, grep, sed, awk, etc.)
+        if _BASH_EXE:
+            git_usr_bin = os.path.join(os.path.dirname(os.path.dirname(_BASH_EXE)), "usr", "bin")
+            if os.path.isdir(git_usr_bin):
+                path_parts.append(git_usr_bin)
+            git_bin = os.path.join(os.path.dirname(os.path.dirname(_BASH_EXE)), "bin")
+            if os.path.isdir(git_bin):
+                path_parts.append(git_bin)
+            git_mingw_bin = os.path.join(os.path.dirname(os.path.dirname(_BASH_EXE)), "mingw64", "bin")
+            if os.path.isdir(git_mingw_bin):
+                path_parts.append(git_mingw_bin)
+        # Essential Windows system paths (for python, pip, etc.)
+        path_parts.extend([
+            os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32"),
+            os.path.join(os.environ.get("SystemRoot", r"C:\Windows")),
+        ])
+        sandbox_path = os.pathsep.join(path_parts)
+        env = {
+            "TERM": "dumb",
+            "LANG": "en_US.UTF-8",
+            "LC_ALL": "en_US.UTF-8",
+            "HOME": abs_data,
+            "TMPDIR": tmp_dir,
+            "TEMP": tmp_dir,
+            "TMP": tmp_dir,
+            "PATH": sandbox_path,
+            "DATA_PATH": abs_data,
+            "SystemRoot": os.environ.get("SystemRoot", r"C:\Windows"),
+            "COMSPEC": os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe"),
+        }
+    else:
+        env = {
+            "TERM": "dumb",
+            "LANG": "en_US.UTF-8",
+            "LC_ALL": "en_US.UTF-8",
+            "HOME": abs_data,
+            "TMPDIR": tmp_dir,
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "DATA_PATH": abs_data,
+        }
+
     if DOCUMENTS_PATH:
         env["DOCUMENTS_PATH"] = os.path.realpath(os.path.expanduser(DOCUMENTS_PATH))
 
@@ -217,6 +271,56 @@ _BLOCKED_PATTERNS = [
     (r'/etc/passwd', "/etc/passwd"),
     (r'/etc/shadow', "/etc/shadow"),
     (r'/etc/sudoers', "/etc/sudoers"),
+    # Destructive filesystem operations
+    (r'\brm\s+(-[^\s]*\s+)*-r\s*f?\s+/', "rm -rf on root"),
+    (r'\brm\s+(-[^\s]*\s+)*-f\s*r?\s+/', "rm -rf on root"),
+    (r'\brm\s+(-[^\s]*\s+)*/\s*$', "rm on root"),
+    (r'>\s*/dev/(sd|hd|nvme|vd|xvd)', "write to block device"),
+    (r'>\s*/dev/mem', "write to /dev/mem"),
+    (r'\bdd\b.*\bof\s*=\s*/dev/', "dd to device"),
+    (r'\bmkfs\b', "mkfs command"),
+    (r'\bfdisk\b', "fdisk command"),
+    (r'\bparted\b', "parted command"),
+    # Privilege escalation
+    (r'\bsudo\b', "sudo command"),
+    (r'\bsu\b\s', "su command"),
+    (r'\bdoas\b', "doas command"),
+    (r'\bchmod\s+[0-7]*s', "setuid/setgid chmod"),
+    (r'\bchown\b', "chown command"),
+    # System state / shutdown
+    (r'\bshutdown\b', "shutdown command"),
+    (r'\breboot\b', "reboot command"),
+    (r'\bpoweroff\b', "poweroff command"),
+    (r'\bhalt\b', "halt command"),
+    (r'\binit\s+[06]\b', "init runlevel change"),
+    (r'\bsystemctl\s+(start|stop|restart|disable|enable|mask|reboot|poweroff|halt)', "systemctl service control"),
+    # Network / exfiltration
+    (r'\bcurl\b.*\|\s*(ba)?sh', "curl piped to shell"),
+    (r'\bwget\b.*\|\s*(ba)?sh', "wget piped to shell"),
+    (r'\bnc\b\s+-[el]', "netcat listener"),
+    (r'\bncat\b', "ncat command"),
+    (r'\bsocat\b', "socat command"),
+    (r'\biptables\b', "iptables command"),
+    (r'\bufw\b', "ufw command"),
+    # Kernel / boot
+    (r'\binsmod\b', "insmod command"),
+    (r'\brmmod\b', "rmmod command"),
+    (r'\bmodprobe\b', "modprobe command"),
+    (r'\bsysctl\s+-w\b', "sysctl write"),
+    # Package managers (prevent installs that could alter the system)
+    (r'\bapt(-get)?\s+(install|remove|purge|dist-upgrade)', "apt package modification"),
+    (r'\byum\s+(install|remove|erase|update)', "yum package modification"),
+    (r'\bdnf\s+(install|remove|erase|upgrade)', "dnf package modification"),
+    (r'\bpacman\s+-[SRU]', "pacman package modification"),
+    (r'\bbrew\s+(install|uninstall|remove)', "brew package modification"),
+    # Windows-specific dangerous commands
+    (r'\bformat\b\s+[A-Za-z]:', "format drive"),
+    (r'\bdiskpart\b', "diskpart command"),
+    (r'\breg\s+(add|delete|import)\b', "registry modification"),
+    (r'\bnet\s+(user|localgroup|stop|start)\b', "net service/user command"),
+    (r'\bsc\s+(delete|stop|config)\b', "sc service command"),
+    (r'\bbcdedit\b', "bcdedit command"),
+    (r'\bschtasks\s+/(create|delete)\b', "scheduled task modification"),
 ]
 
 
@@ -232,23 +336,50 @@ def _validate_bash_command(command: str) -> str | None:
     abs_data = os.path.realpath(os.path.expanduser(DATA_PATH))
     abs_docs = os.path.realpath(os.path.expanduser(DOCUMENTS_PATH)) if DOCUMENTS_PATH else None
 
-    # Match only absolute paths (preceded by whitespace, start of string, or shell operators)
+    # Normalize for comparison (on Windows, realpath uses backslashes)
+    abs_data_lower = abs_data.lower() if IS_WINDOWS else abs_data
+    abs_docs_lower = abs_docs.lower() if (IS_WINDOWS and abs_docs) else abs_docs
+
+    def _is_allowed_path(p: str) -> bool:
+        """Check if a path is within allowed directories or is a standard tool path."""
+        norm = os.path.normpath(p)
+        if IS_WINDOWS:
+            norm_lower = norm.lower()
+            if norm_lower.startswith(abs_data_lower):
+                return True
+            if abs_docs_lower and norm_lower.startswith(abs_docs_lower):
+                return True
+        else:
+            if norm.startswith(abs_data):
+                return True
+            if abs_docs and norm.startswith(abs_docs):
+                return True
+        # Allow standard Unix tool/device paths (check against original path
+        # since os.path.normpath on Windows converts /usr/bin to \usr\bin)
+        if p.startswith(('/usr/bin/', '/usr/local/bin/', '/bin/',
+                         '/dev/null', '/dev/stdout', '/dev/stderr',
+                         '/dev/stdin', '/dev/fd/')):
+            return True
+        return False
+
+    # Match Unix-style absolute paths (/...)
     for match in re.finditer(r'(?:^|(?<=\s)|(?<=[;|&><]))(/[^\s;|&><"\'`\)]+)', command):
-        path = os.path.normpath(match.group(1))
-        # Allow paths within DATA_PATH or DOCUMENTS_PATH
-        if path.startswith(abs_data):
-            continue
-        if abs_docs and path.startswith(abs_docs):
-            continue
-        # Allow standard tool/device paths
-        if path.startswith(('/usr/bin/', '/usr/local/bin/', '/bin/',
-                            '/dev/null', '/dev/stdout', '/dev/stderr',
-                            '/dev/stdin', '/dev/fd/')):
-            continue
-        return (f"Command blocked: references path '{path}' outside allowed directories. "
-                f"Commands must operate within DATA_PATH ({abs_data})"
-                + (f" or DOCUMENTS_PATH ({abs_docs})" if abs_docs else "")
-                + ".")
+        if not _is_allowed_path(match.group(1)):
+            path = os.path.normpath(match.group(1))
+            return (f"Command blocked: references path '{path}' outside allowed directories. "
+                    f"Commands must operate within DATA_PATH ({abs_data})"
+                    + (f" or DOCUMENTS_PATH ({abs_docs})" if abs_docs else "")
+                    + ".")
+
+    # Match Windows-style absolute paths (C:\... or C:/...)
+    if IS_WINDOWS:
+        for match in re.finditer(r'(?:^|(?<=\s)|(?<=["]))([A-Za-z]:[/\\][^\s;|&><"\'`\)]*)', command):
+            if not _is_allowed_path(match.group(1)):
+                path = os.path.normpath(match.group(1))
+                return (f"Command blocked: references path '{path}' outside allowed directories. "
+                        f"Commands must operate within DATA_PATH ({abs_data})"
+                        + (f" or DOCUMENTS_PATH ({abs_docs})" if abs_docs else "")
+                        + ".")
 
     return None
 
@@ -308,15 +439,26 @@ def bash(
         timeout = min(timeout, 300)
 
         # Execute command with sandboxed environment
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            cwd=work_dir,
-            timeout=timeout,
-            env=_get_sandbox_env()
-        )
+        # On Windows, route through bash (Git Bash) so Unix commands work
+        if IS_WINDOWS and _BASH_EXE:
+            result = subprocess.run(
+                [_BASH_EXE, "-c", command],
+                capture_output=True,
+                text=True,
+                cwd=work_dir,
+                timeout=timeout,
+                env=_get_sandbox_env()
+            )
+        else:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                cwd=work_dir,
+                timeout=timeout,
+                env=_get_sandbox_env()
+            )
 
         stdout = _truncate_output(result.stdout.strip())
         stderr = result.stderr.strip()
@@ -566,7 +708,7 @@ def _read_text(file_path: str, file_size: int, file_ext: str, encoding: str, max
 Files are created within the working directory with owner-only access.
 
 Args:
-- path: FULL absolute file path (e.g., "/tmp/onit/data/<session_id>/output.txt"). Always use the complete working directory path from your system prompt — never use relative paths.
+- path: FULL absolute file path (e.g., "/tmp/onit/data/<session_id>/output.txt"). Always use the complete working directory path from your system prompt - never use relative paths.
 - content: Text content to write (required)
 - mode: "write" (overwrite) or "append" (add to end) (default: "write")
 - encoding: Text encoding (default: utf-8)
@@ -637,10 +779,10 @@ If callback_url is provided, uploads the file via HTTP POST and returns the down
 Otherwise, returns the file content as base64-encoded data (max 10MB).
 
 Args:
-- path: FULL absolute file path (e.g., "/tmp/onit/data/<session_id>/file.pdf"). Always use the complete working directory path — never use relative paths. (required)
+- path: FULL absolute file path (e.g., "/tmp/onit/data/<session_id>/file.pdf"). Always use the complete working directory path - never use relative paths. (required)
 - callback_url: Full upload URL prefix (e.g., "http://host:9000/uploads/session_id"). File is POSTed to {callback_url}/ (optional)
 
-Returns JSON: {filename, size_bytes, download_url, status} or {filename, size_bytes, content_base64, status}"""
+Returns JSON: {path, filename, size_bytes, download_url, status} or {path, filename, size_bytes, file_data_base64, status}"""
 )
 def send_file(
     path: Optional[str] = None,
@@ -671,6 +813,7 @@ def send_file(
                     )
                     resp.raise_for_status()
                 return json.dumps({
+                    "path": file_path,
                     "filename": filename,
                     "size_bytes": file_size,
                     "download_url": f"{cb}/{filename}",
@@ -679,6 +822,7 @@ def send_file(
             except Exception as e:
                 return json.dumps({
                     "error": f"Upload failed: {str(e)}",
+                    "path": file_path,
                     "filename": filename,
                     "status": "failed"
                 })
@@ -687,6 +831,7 @@ def send_file(
         if file_size > MAX_BASE64_SIZE:
             return json.dumps({
                 "error": f"File too large for base64 transfer ({file_size} bytes, max {MAX_BASE64_SIZE}). Provide a callback_url instead.",
+                "path": file_path,
                 "filename": filename,
                 "size_bytes": file_size,
                 "status": "failed"
@@ -696,9 +841,10 @@ def send_file(
             content = base64.b64encode(f.read()).decode('ascii')
 
         return json.dumps({
+            "path": file_path,
             "filename": filename,
             "size_bytes": file_size,
-            "content_base64": content,
+            "file_data_base64": content,
             "status": "success"
         })
 
@@ -720,15 +866,25 @@ def _run_command(command: str, cwd: str = ".", timeout: int = 60) -> Dict[str, A
         if not os.path.isdir(work_dir):
             return {"error": f"Directory does not exist: {work_dir}", "status": "error"}
 
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            cwd=work_dir,
-            timeout=timeout,
-            env=_get_sandbox_env()
-        )
+        if IS_WINDOWS and _BASH_EXE:
+            result = subprocess.run(
+                [_BASH_EXE, "-c", command],
+                capture_output=True,
+                text=True,
+                cwd=work_dir,
+                timeout=timeout,
+                env=_get_sandbox_env()
+            )
+        else:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                cwd=work_dir,
+                timeout=timeout,
+                env=_get_sandbox_env()
+            )
 
         return {
             "stdout": result.stdout.strip(),

@@ -30,6 +30,18 @@ from typing import List, Optional, Any
 
 logger = logging.getLogger(__name__)
 
+# Maximum characters for a tool response stored in conversation history.
+# Larger responses are truncated to avoid blowing up the context window.
+MAX_TOOL_RESPONSE = 16000
+
+
+def _truncate_tool_response(response: str) -> str:
+    """Truncate a tool response if it exceeds MAX_TOOL_RESPONSE characters."""
+    if len(response) <= MAX_TOOL_RESPONSE:
+        return response
+    half = MAX_TOOL_RESPONSE // 2
+    return response[:half] + f"\n\n... [truncated {len(response) - MAX_TOOL_RESPONSE} chars] ...\n\n" + response[-half:]
+
 
 def _resolve_api_key(host: str, host_key: str = "EMPTY") -> str:
     """Resolve the API key based on the host URL.
@@ -588,6 +600,7 @@ async def chat(host: str = "http://127.0.0.1:8001/v1",
                             _vision_b64, _vision_mime = None, None
                             if data_path and "file_data_base64" in tool_response:
                                 tool_response, _vision_b64, _vision_mime = _extract_base64_file(tool_response, data_path)
+                            tool_response = _truncate_tool_response(tool_response)
                             if _vision_b64:
                                 tool_content = [
                                     {"type": "text", "text": tool_response},
@@ -691,6 +704,7 @@ async def chat(host: str = "http://127.0.0.1:8001/v1",
                         _vision_b64, _vision_mime = None, None
                         if data_path and "file_data_base64" in tool_response:
                             tool_response, _vision_b64, _vision_mime = _extract_base64_file(tool_response, data_path)
+                        tool_response = _truncate_tool_response(tool_response)
                         if _vision_b64:
                             tool_content = [
                                 {"type": "text", "text": tool_response},

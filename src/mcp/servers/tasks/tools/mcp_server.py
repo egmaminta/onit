@@ -271,7 +271,7 @@ Args:
 - path: Path to the file within data_path folder (required)
 - callback_url: Full upload URL prefix (e.g., "http://host:9000/uploads/session_id"). File is POSTed to {callback_url}/ (optional)
 
-Returns JSON: {filename, size_bytes, download_url, status} or {filename, size_bytes, content_base64, status}"""
+Returns JSON: {path, filename, size_bytes, download_url, status} or {path, filename, size_bytes, file_data_base64, status}"""
 )
 def send_file(path: Optional[str] = None, callback_url: Optional[str] = None) -> str:
     if err := _validate_required(path=path):
