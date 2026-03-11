@@ -632,8 +632,12 @@ class WebChatUI:
                 });
 
                 observer.observe(scroller, { childList: true, subtree: true });
+
+                // Scroll to bottom on initial attach
+                scroller.scrollTop = scroller.scrollHeight;
+                savedScrollTop = scroller.scrollTop;
             }
-            setTimeout(attach, 1500);
+            setTimeout(attach, 500);
         }
         """
         with gr.Blocks(title=self.title, analytics_enabled=False, js=scroll_js) as app:
